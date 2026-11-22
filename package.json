@@ -1,0 +1,29 @@
+{
+  "name": "haven-tunes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Haven Tunes 2000 — Windows 2000-era classic decentralized media player on the Haven L7 stack (Arkiv + Filecoin/IPFS + EVM Token Gates + ICP Haven-AOL VetKD).",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5175",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5175"
+  },
+  "dependencies": {
+    "@arkiv-network/sdk": "1.0.1",
+    "@filoz/synapse-core": "0.11.0",
+    "@filoz/synapse-sdk": "2.0.2",
+    "@icp-sdk/core": "6.1.1",
+    "@icp-sdk/vetkeys": "0.7.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "viem": "^2.40.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.3.0"
+  }
+}
