@@ -84,7 +84,7 @@ export const DEFAULT_CONFIG: HavenConfig = {
   arkivRpcUrl: ARKIV_PRESETS.rabdi.rpcUrl,
   arkivAccessKey: '',
   ipfsGateway: 'https://ipfs.io/ipfs/',
-  aolCanisterId: 'gny6k-fqaaa-aaaab-ag3ra-cai',
+  aolCanisterId: '3gzy3-kaaaa-aaaan-q6y6q-cai',
   icpHost: 'https://icp-api.io',
   showDemoTracks: true,
 };
