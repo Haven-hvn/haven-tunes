@@ -49,6 +49,8 @@ jobs:
         run: npm install --legacy-peer-deps
 
       - name: Build Vite app
+        env:
+          VITE_ARKIV_API_KEY: ${{ secrets.ARKIV_API_KEY }}
         run: |
           echo "Building Haven Tunes 2000..."
           npm run build

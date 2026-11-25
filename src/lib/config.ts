@@ -82,7 +82,7 @@ export const VARIANT_TO_CHAIN_ID: Record<string, number> = {
 export const DEFAULT_CONFIG: HavenConfig = {
   arkivPreset: 'rabdi',
   arkivRpcUrl: ARKIV_PRESETS.rabdi.rpcUrl,
-  arkivAccessKey: '',
+  arkivAccessKey: (import.meta.env.VITE_ARKIV_API_KEY as string | undefined) ?? '',
   ipfsGateway: 'https://ipfs.io/ipfs/',
   aolCanisterId: '3gzy3-kaaaa-aaaan-q6y6q-cai',
   icpHost: 'https://icp-api.io',
