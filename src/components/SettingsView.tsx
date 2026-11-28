@@ -8,7 +8,7 @@ export function SettingsView() {
   return (
     <div className="w2k-panel-scroll">
       <div className="w2k-groupbox">
-        <div className="w2k-group-title">Arkiv OP L3 Metadata Network</div>
+        <div className="w2k-group-title">Arkiv OP L3 Metadata &amp; Storage Gateways</div>
         <div className="w2k-form-grid">
           <label>Preset</label>
           <select
@@ -43,11 +43,27 @@ export function SettingsView() {
             onChange={(e) => haven.updateConfig({ arkivAccessKey: e.target.value })}
           />
 
-          <label>IPFS / Filecoin Gateway</label>
+          <label>IPFS Gateway</label>
           <input
             className="w2k-input w2k-mono"
             value={cfg.ipfsGateway}
             onChange={(e) => haven.updateConfig({ ipfsGateway: e.target.value })}
+          />
+
+          <label>Filecoin Synapse URL</label>
+          <input
+            className="w2k-input w2k-mono"
+            value={cfg.synapseBaseUrl}
+            onChange={(e) => haven.updateConfig({ synapseBaseUrl: e.target.value })}
+          />
+
+          <label>Synapse API Key</label>
+          <input
+            className="w2k-input w2k-mono"
+            type="password"
+            placeholder="Optional Filecoin Synapse API key"
+            value={cfg.synapseApiKey}
+            onChange={(e) => haven.updateConfig({ synapseApiKey: e.target.value })}
           />
 
           <label>Haven-AOL Canister</label>
@@ -57,6 +73,13 @@ export function SettingsView() {
             onChange={(e) => haven.updateConfig({ aolCanisterId: e.target.value })}
           />
 
+          <label>ICP Host</label>
+          <input
+            className="w2k-input w2k-mono"
+            value={cfg.icpHost}
+            onChange={(e) => haven.updateConfig({ icpHost: e.target.value })}
+          />
+
           <label>Demo Synth Library</label>
           <label className="w2k-check">
             <input
@@ -64,12 +87,12 @@ export function SettingsView() {
               checked={cfg.showDemoTracks}
               onChange={(e) => haven.updateConfig({ showDemoTracks: e.target.checked })}
             />
-            Include synthesized demo tracks alongside live Arkiv entities
+            Include offline synthesized demo tracks alongside live Arkiv entities
           </label>
         </div>
 
         <div className="w2k-actions-row">
-          <button className="w2k-btn w2k-btn-primary" onClick={() => void haven.refreshLibrary()}>
+          <button className="w2k-btn w2k-btn-primary" onClick={() => void haven.refreshLibrary(true)}>
             Apply &amp; Rescan Arkiv
           </button>
           {haven.scanError && <span className="w2k-err-text">Last error: {haven.scanError}</span>}
@@ -85,7 +108,8 @@ export function SettingsView() {
             <ul className="w2k-key-list">
               {Object.values(haven.keyring).map((k) => (
                 <li key={k.gateId}>
-                  <code className="w2k-mono">{k.gateId}</code> — Epoch <strong>{k.epoch}</strong> (AES-256-GCM ready)
+                  <code className="w2k-mono">{k.gateId}</code> — Epoch <strong>{k.epoch}</strong> (
+                  {k.vetKey ? 'VetKD IBE + AES-256-GCM ready' : 'AES-256-GCM ready'})
                 </li>
               ))}
             </ul>

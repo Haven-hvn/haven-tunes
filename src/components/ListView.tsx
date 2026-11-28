@@ -7,6 +7,7 @@ import { LockIcon, PlayIcon, UnlockIcon } from './icons';
 type SortKey = 'title' | 'durationSec' | 'artist' | 'album' | 'kind' | 'rating' | 'plays';
 
 function fmtDur(sec: number): string {
+  if (!sec || sec <= 0) return '—';
   const s = Math.max(0, Math.floor(sec));
   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 }
@@ -15,9 +16,10 @@ interface ListViewProps {
   items: MediaItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  activePlaylistId?: string | null;
 }
 
-export function ListView({ items, selectedId, onSelect }: ListViewProps) {
+export function ListView({ items, selectedId, onSelect, activePlaylistId }: ListViewProps) {
   const haven = useHaven();
   const player = usePlayer();
   const [sortKey, setSortKey] = useState<SortKey>('title');
@@ -48,8 +50,14 @@ export function ListView({ items, selectedId, onSelect }: ListViewProps) {
   if (sorted.length === 0) {
     return (
       <div className="w2k-empty-pane">
-        <p>No media items match this view.</p>
-        <button className="w2k-btn" onClick={() => void haven.refreshLibrary()}>
+        <p>
+          {haven.scanning
+            ? 'Scanning Arkiv OP L3 for Haven media entities…'
+            : activePlaylistId
+              ? 'This playlist is empty. Select any track in All Media and use "Add to Playlist" in the inspector bar.'
+              : 'No live Arkiv media items match this view.'}
+        </p>
+        <button className="w2k-btn" onClick={() => void haven.refreshLibrary(true)}>
           Rescan Arkiv L3
         </button>
       </div>
@@ -65,7 +73,7 @@ export function ListView({ items, selectedId, onSelect }: ListViewProps) {
             <th onClick={() => toggleSort('title')}>
               Name {sortKey === 'title' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
             </th>
-            <th style={{ width: 64 }} onClick={() => toggleSort('durationSec')}>
+            <th style={{ width: 58 }} onClick={() => toggleSort('durationSec')}>
               Time {sortKey === 'durationSec' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
             </th>
             <th onClick={() => toggleSort('artist')}>
@@ -74,16 +82,17 @@ export function ListView({ items, selectedId, onSelect }: ListViewProps) {
             <th onClick={() => toggleSort('album')}>
               DataDAO / Album {sortKey === 'album' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
             </th>
-            <th style={{ width: 72 }} onClick={() => toggleSort('kind')}>
+            <th style={{ width: 64 }} onClick={() => toggleSort('kind')}>
               Type
             </th>
-            <th style={{ width: 132 }}>Access / Gate</th>
-            <th style={{ width: 88 }} onClick={() => toggleSort('rating')}>
+            <th style={{ width: 128 }}>Access / Gate</th>
+            <th style={{ width: 84 }} onClick={() => toggleSort('rating')}>
               Rating
             </th>
-            <th style={{ width: 54 }} onClick={() => toggleSort('plays')}>
+            <th style={{ width: 48 }} onClick={() => toggleSort('plays')}>
               Plays
             </th>
+            {activePlaylistId && <th style={{ width: 32 }} />}
           </tr>
         </thead>
         <tbody>
@@ -103,7 +112,7 @@ export function ListView({ items, selectedId, onSelect }: ListViewProps) {
                 <td className="w2k-col-play">
                   <button
                     className="w2k-row-play"
-                    title="Play"
+                    title="Play / Open"
                     onClick={(e) => {
                       e.stopPropagation();
                       void player.playItem(item, sorted);
@@ -115,6 +124,16 @@ export function ListView({ items, selectedId, onSelect }: ListViewProps) {
                 <td className="w2k-col-title">
                   <span>{item.title}</span>
                   {item.demo && <span className="w2k-chip demo">DEMO</span>}
+                  {item.dripIdx != null && (
+                    <span className="w2k-chip" title="Drip Series Part">
+                      Part #{item.dripIdx}
+                    </span>
+                  )}
+                  {item.mcapUsd != null && item.mcapUsd > 0 && (
+                    <span className="w2k-chip" title="Market Cap Unlock Threshold">
+                      ${item.mcapUsd.toLocaleString()}
+                    </span>
+                  )}
                   {item.attestation?.verified && (
                     <span className="w2k-chip attn" title="Cryptographic holder attestation verified">
                       ✓ Holder
@@ -159,6 +178,20 @@ export function ListView({ items, selectedId, onSelect }: ListViewProps) {
                   </span>
                 </td>
                 <td className="w2k-col-num">{item.plays}</td>
+                {activePlaylistId && (
+                  <td>
+                    <button
+                      className="w2k-row-play"
+                      title="Remove from playlist"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        haven.removeFromPlaylist(activePlaylistId, item.id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </td>
+                )}
               </tr>
             );
           })}

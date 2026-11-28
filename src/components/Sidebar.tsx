@@ -16,6 +16,7 @@ export function Sidebar({ source, onSelect }: SidebarProps) {
 
   const musicCount = haven.allItems.filter((i) => i.kind === 'audio').length;
   const videoCount = haven.allItems.filter((i) => i.kind === 'video').length;
+  const imageCount = haven.allItems.filter((i) => i.kind === 'image').length;
   const dripCount = haven.allItems.filter((i) => i.kind === 'drip').length;
 
   return (
@@ -36,6 +37,11 @@ export function Sidebar({ source, onSelect }: SidebarProps) {
           <FilmIcon />
           <span>Videos</span>
           <em className="w2k-sb-count">{videoCount}</em>
+        </button>
+        <button className={`w2k-sb-item ${source === 'images' ? 'active' : ''}`} onClick={() => onSelect('images')}>
+          <span>🖼</span>
+          <span>Images</span>
+          <em className="w2k-sb-count">{imageCount}</em>
         </button>
         <button className={`w2k-sb-item ${source === 'drips' ? 'active' : ''}`} onClick={() => onSelect('drips')}>
           <FilmIcon />
@@ -151,13 +157,14 @@ export function Sidebar({ source, onSelect }: SidebarProps) {
           {current ? (
             <img
               src={
+                player.activeImageUrl ||
                 current.thumbnailUrl ||
                 getCoverArtDataUrl(current.album || current.title, current.artist, current.kind === 'video')
               }
               alt={current.title}
             />
           ) : (
-            <div className="w2k-sb-artempty">Select a track or video</div>
+            <div className="w2k-sb-artempty">Select a track, video, or image</div>
           )}
         </div>
       </div>

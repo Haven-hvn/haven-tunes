@@ -24,6 +24,8 @@ interface PlayerContextValue {
   shuffle: boolean;
   repeat: RepeatMode;
   activeVideoUrl: string | null;
+  activeImageUrl: string | null;
+  activeMediaUrl: string | null;
   theaterOpen: boolean;
   setTheaterOpen: (open: boolean) => void;
   playItem: (item: MediaItem, queue?: MediaItem[]) => Promise<void>;
@@ -35,6 +37,9 @@ interface PlayerContextValue {
   toggleShuffle: () => void;
   cycleRepeat: () => void;
   videoElRef: React.RefObject<HTMLVideoElement | null>;
+  onVideoTimeUpdate: (time: number, dur: number) => void;
+  onVideoPlayingChange: (playing: boolean) => void;
+  onVideoEnded: () => void;
 }
 
 const PlayerContext = createContext<PlayerContextValue | null>(null);
@@ -52,6 +57,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('off');
   const [activeVideoUrl, setActiveVideoUrl] = useState<string | null>(null);
+  const [activeImageUrl, setActiveImageUrl] = useState<string | null>(null);
+  const [activeMediaUrl, setActiveMediaUrl] = useState<string | null>(null);
   const [theaterOpen, setTheaterOpen] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -59,6 +66,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const synthRef = useRef<RetroSynthEngine | null>(null);
   const synthTimerRef = useRef<number | null>(null);
   const blobUrlCache = useRef<Map<string, string>>(new Map());
+  const nextRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const audio = new Audio();
@@ -91,12 +99,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setCurrentItem(item);
       if (nextQueue) setQueue(nextQueue);
       setCurrentTime(0);
-      setDuration(item.durationSec || 180);
+      setDuration(item.durationSec || 0);
 
-      // Demo synth track
+      // Optional demo synth track (only when user explicitly enables demo tracks)
       if (item.demo && !item.mediaUrl) {
         setActiveVideoUrl(null);
+        setActiveImageUrl(null);
+        setActiveMediaUrl(null);
         setTheaterOpen(false);
+        setDuration(item.durationSec || 180);
         synthRef.current?.configure(item.id);
         synthRef.current?.setVolume(volume);
         synthRef.current?.start();
@@ -113,9 +124,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Real Haven Arkiv + Filecoin/IPFS media (audio or video)
+      // Real Haven Arkiv + Filecoin Synapse / IPFS media (audio, video, drip, image, file)
       setIsLoading(true);
-      setLoadStatus(item.encrypted ? 'Checking Haven-AOL VetKD gate key…' : 'Fetching from Filecoin/IPFS gateway…');
+      setLoadStatus(
+        item.encrypted
+          ? 'Checking Haven-AOL VetKD v3 gate key…'
+          : 'Fetching from Filecoin / IPFS gateway…',
+      );
       try {
         let unlockedKey = item.gate ? haven.keyring[item.gate.gateId] : undefined;
         if (item.encrypted && item.gate && !unlockedKey) {
@@ -130,13 +145,26 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         let objectUrl = blobUrlCache.current.get(item.id);
         if (!objectUrl) {
-          setLoadStatus(item.encrypted ? 'Fetching & decrypting AES-256-GCM media…' : 'Buffering media stream…');
-          const prepared = await fetchAndPrepareMediaUrl(item, unlockedKey);
+          setLoadStatus(
+            item.encrypted
+              ? 'Fetching Filecoin piece & decrypting AES-256-GCM…'
+              : 'Buffering media stream…',
+          );
+          const prepared = await fetchAndPrepareMediaUrl(item, haven.config, unlockedKey);
           objectUrl = prepared.objectUrl;
           blobUrlCache.current.set(item.id, objectUrl);
         }
 
-        if (item.kind === 'video' || item.kind === 'drip' || item.mimeType.startsWith('video/')) {
+        setActiveMediaUrl(objectUrl);
+
+        if (item.kind === 'image' || item.mimeType.startsWith('image/')) {
+          setActiveVideoUrl(null);
+          setActiveImageUrl(objectUrl);
+          setTheaterOpen(true);
+          setIsPlaying(false);
+          haven.recordPlay(item.id);
+        } else if (item.kind === 'video' || item.kind === 'drip' || item.mimeType.startsWith('video/')) {
+          setActiveImageUrl(null);
           setActiveVideoUrl(objectUrl);
           setTheaterOpen(true);
           setIsPlaying(true);
@@ -145,27 +173,44 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             const vid = videoElRef.current;
             if (vid) {
               vid.volume = volume;
-              void vid.play().catch(() => {});
+              void vid.play().catch(() => {
+                setIsPlaying(false);
+              });
             }
           }, 60);
-        } else {
+        } else if (item.kind === 'audio' || item.mimeType.startsWith('audio/')) {
           setActiveVideoUrl(null);
+          setActiveImageUrl(null);
           setTheaterOpen(false);
           const audio = audioRef.current;
           if (audio) {
             audio.src = objectUrl;
             audio.volume = volume;
             audio.ontimeupdate = () => setCurrentTime(audio.currentTime);
-            audio.onloadedmetadata = () => setDuration(audio.duration || item.durationSec || 180);
-            audio.onended = () => setIsPlaying(false);
+            audio.onloadedmetadata = () =>
+              setDuration(Number.isFinite(audio.duration) ? audio.duration : item.durationSec || 0);
+            audio.onended = () => {
+              setIsPlaying(false);
+              nextRef.current();
+            };
             await audio.play();
             setIsPlaying(true);
             haven.recordPlay(item.id);
           }
+        } else {
+          // Generic file (PDF, ZIP, etc.) — offer download via toast & open in new tab
+          setActiveVideoUrl(null);
+          setActiveImageUrl(null);
+          setTheaterOpen(false);
+          haven.recordPlay(item.id);
+          const a = document.createElement('a');
+          a.href = objectUrl;
+          a.download = item.title || 'haven-file';
+          a.click();
+          haven.showToast(`Downloaded "${item.title}" (${item.mimeType}).`, 'ok');
         }
       } catch (err) {
         haven.showToast(err instanceof Error ? err.message : 'Playback failed', 'err');
-        // Fallback to synth preview if it's a demo or unreachable gateway
         setIsPlaying(false);
       } finally {
         setIsLoading(false);
@@ -206,7 +251,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
       return;
     }
-    if (audioRef.current) {
+    if (audioRef.current && audioRef.current.src) {
       if (isPlaying) {
         audioRef.current.pause();
         setIsPlaying(false);
@@ -236,19 +281,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
   }, [currentItem, playItem, queue, repeat, shuffle]);
 
-  const prev = useCallback(() => {
-    if (queue.length === 0 || !currentItem) return;
-    if (currentTime > 4) {
-      seek(0);
-      return;
-    }
-    const idx = queue.findIndex((x) => x.id === currentItem.id);
-    const prevIdx = idx > 0 ? idx - 1 : queue.length - 1;
-    if (queue[prevIdx]) {
-      void playItem(queue[prevIdx], queue);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentItem, currentTime, playItem, queue]);
+  useEffect(() => {
+    nextRef.current = next;
+  }, [next]);
 
   const seek = useCallback(
     (sec: number) => {
@@ -262,6 +297,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     },
     [activeVideoUrl, currentItem?.demo, duration],
   );
+
+  const prev = useCallback(() => {
+    if (queue.length === 0 || !currentItem) return;
+    if (currentTime > 4) {
+      seek(0);
+      return;
+    }
+    const idx = queue.findIndex((x) => x.id === currentItem.id);
+    const prevIdx = idx > 0 ? idx - 1 : queue.length - 1;
+    if (queue[prevIdx]) {
+      void playItem(queue[prevIdx], queue);
+    }
+  }, [currentItem, currentTime, playItem, queue, seek]);
 
   const setVolume = useCallback((v: number) => {
     const clamped = Math.max(0, Math.min(1, v));
@@ -277,6 +325,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const onVideoTimeUpdate = useCallback((time: number, dur: number) => {
+    setCurrentTime(time);
+    if (Number.isFinite(dur) && dur > 0) setDuration(dur);
+  }, []);
+
+  const onVideoPlayingChange = useCallback((playing: boolean) => {
+    setIsPlaying(playing);
+  }, []);
+
+  const onVideoEnded = useCallback(() => {
+    setIsPlaying(false);
+    nextRef.current();
+  }, []);
+
+  // Global Space key to toggle play/pause
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+      if (e.code === 'Space' && currentItem && !activeImageUrl) {
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeImageUrl, currentItem, togglePlay]);
+
   return (
     <PlayerContext.Provider
       value={{
@@ -291,6 +372,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         shuffle,
         repeat,
         activeVideoUrl,
+        activeImageUrl,
+        activeMediaUrl,
         theaterOpen,
         setTheaterOpen,
         playItem,
@@ -302,6 +385,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         toggleShuffle,
         cycleRepeat,
         videoElRef,
+        onVideoTimeUpdate,
+        onVideoPlayingChange,
+        onVideoEnded,
       }}
     >
       {children}

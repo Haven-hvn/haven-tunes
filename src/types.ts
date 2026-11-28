@@ -1,4 +1,11 @@
-export type MediaKind = 'audio' | 'video' | 'drip' | 'file';
+export type MediaKind = 'audio' | 'video' | 'image' | 'drip' | 'file';
+
+export type HavenAolChainVariant =
+  | 'EthMainnet'
+  | 'EthSepolia'
+  | 'ArbitrumOne'
+  | 'BaseMainnet'
+  | 'OptimismMainnet';
 
 export type ViewMode = 'list' | 'grid' | 'coverflow';
 
@@ -12,6 +19,7 @@ export type SourceId =
   | 'all'
   | 'music'
   | 'videos'
+  | 'images'
   | 'drips'
   | 'my-uploads'
   | 'community'
@@ -25,18 +33,24 @@ export type SourceId =
   | `pl:${string}`;
 
 export interface TokenGateRef {
+  type?: number; // 1 = per-file, 3 = per-epoch, 4 = marketcap drip
   chain: string;
+  chainVariant: HavenAolChainVariant;
   chainId: number;
   tokenAddress: string;
   threshold: string;
+  epoch?: number;
+  /** Canonical gate key matching Haven OS (`gate:<chainId>:<token>:<threshold>`). */
   gateId: string;
 }
 
 export interface AttestationInfo {
   verified: boolean;
+  evmAddress?: string;
   chain?: string;
   token?: string;
   balance?: string;
+  epoch?: number;
   blockNumber?: number;
 }
 
@@ -55,13 +69,25 @@ export interface MediaItem {
   sizeBytes?: number;
   createdAtBlock: number;
   createdAtMs: number;
+  /** Primary CID (`fcid` for clear IPFS/Filecoin or `pieceCid` for sealed Filecoin piece). */
   cid?: string;
+  /** Clear IPFS/Filecoin CID when unencrypted. */
+  fcid?: string;
+  /** Filecoin Synapse piece CID when sealed/encrypted. */
+  pieceCid?: string;
   mediaUrl?: string;
   thumbnailUrl?: string;
   encrypted: boolean;
+  sealedMask?: number;
   gate?: TokenGateRef;
+  gateJsonStr?: string;
   gateJson?: Record<string, unknown>;
   epoch?: number;
+  board?: string;
+  dripId?: string;
+  dripIdx?: number;
+  seriesRef?: string;
+  mcapUsd?: number;
   attestation?: AttestationInfo;
   tags: string[];
   rating: number; // 0..5
@@ -73,6 +99,7 @@ export interface MediaItem {
 export interface DataDaoEntry {
   gateId: string;
   chain: string;
+  chainVariant: HavenAolChainVariant;
   chainId: number;
   tokenAddress: string;
   threshold: string;
@@ -99,7 +126,11 @@ export interface HavenConfig {
   arkivRpcUrl: string;
   arkivAccessKey: string;
   ipfsGateway: string;
+  synapseBaseUrl: string;
+  synapseApiKey: string;
   aolCanisterId: string;
+  aolVerifyingContract: string;
+  eip712ChainId: number;
   icpHost: string;
   showDemoTracks: boolean;
 }

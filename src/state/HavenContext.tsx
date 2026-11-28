@@ -19,9 +19,18 @@ import type {
   WalletState,
 } from '../types';
 import { loadConfig, saveConfig } from '../lib/config';
-import { buildDataDaoDirectory, fetchHavenMediaLibrary } from '../lib/arkiv';
+import {
+  buildDataDaoDirectory,
+  fetchHavenMediaLibrary,
+  loadCachedMediaLibrary,
+  parseBridgeEntityToMedia,
+} from '../lib/arkiv';
 import { connectWallet, inspectDaoGateStanding, type Eip1193Provider } from '../lib/evm';
-import { unlockGateViaVetKd, type UnlockedGateKey } from '../lib/aol';
+import {
+  deserializeBridgeVetKey,
+  unlockGateViaVetKd,
+  type UnlockedGateKey,
+} from '../lib/aol';
 import {
   registerHavenOsBridge,
   type HavenOsBridgeClient,
@@ -70,7 +79,7 @@ interface HavenContextValue {
   scanError: string | null;
   blockNumber: number | null;
   lastScanMs: number | null;
-  refreshLibrary: () => Promise<void>;
+  refreshLibrary: (forceRpc?: boolean) => Promise<void>;
   liveItems: MediaItem[];
   allItems: MediaItem[];
   daos: DataDaoEntry[];
@@ -81,7 +90,9 @@ interface HavenContextValue {
   standingFor: (item: MediaItem) => GateStanding;
   playlists: Playlist[];
   createPlaylist: (name?: string, trackIds?: string[]) => Playlist;
+  renamePlaylist: (playlistId: string, name: string) => void;
   addToPlaylist: (playlistId: string, trackId: string) => void;
+  removeFromPlaylist: (playlistId: string, trackId: string) => void;
   deletePlaylist: (playlistId: string) => void;
   setRating: (id: string, rating: number) => void;
   recordPlay: (id: string) => void;
@@ -90,6 +101,8 @@ interface HavenContextValue {
   geniusIds: string[];
   runGenius: (seedItem: MediaItem) => void;
   itemsForSource: (source: SourceId) => MediaItem[];
+  pendingOpenEntityKey: string | null;
+  clearPendingOpenEntity: () => void;
   toast: ToastMessage | null;
   showToast: (text: string, tone?: ToastMessage['tone']) => void;
 }
@@ -110,16 +123,23 @@ export function HavenProvider({ children }: { children: ReactNode }) {
   const [osBridgeOrigin, setOsBridgeOrigin] = useState<string | null>(null);
   const bridgeRef = useRef<HavenOsBridgeClient | null>(null);
   const providerRef = useRef<Eip1193Provider | null>(null);
+  const configRef = useRef<HavenConfig>(config);
+  configRef.current = config;
 
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [blockNumber, setBlockNumber] = useState<number | null>(null);
   const [lastScanMs, setLastScanMs] = useState<number | null>(null);
-  const [liveItems, setLiveItems] = useState<MediaItem[]>([]);
+  const [liveItems, setLiveItems] = useState<MediaItem[]>(() =>
+    loadCachedMediaLibrary(loadConfig().arkivRpcUrl),
+  );
   const [localPublished, setLocalPublished] = useState<MediaItem[]>([]);
-  const [daos, setDaos] = useState<DataDaoEntry[]>([]);
+  const [daos, setDaos] = useState<DataDaoEntry[]>(() =>
+    buildDataDaoDirectory(loadCachedMediaLibrary(loadConfig().arkivRpcUrl)),
+  );
   const [keyring, setKeyring] = useState<Record<string, UnlockedGateKey>>({});
   const [unlockingGateId, setUnlockingGateId] = useState<string | null>(null);
+  const [pendingOpenEntityKey, setPendingOpenEntityKey] = useState<string | null>(null);
 
   const [playlists, setPlaylists] = useState<Playlist[]>(() => loadPlaylists());
   const [localMeta, setLocalMeta] = useState<LocalMeta>(() => loadLocalMeta());
@@ -143,6 +163,62 @@ export function HavenProvider({ children }: { children: ReactNode }) {
       return next;
     });
   }, []);
+
+  const syncFromBridgeEntities = useCallback(
+    async (bridge: HavenOsBridgeClient, forceRefresh = false): Promise<boolean> => {
+      const t0 = performance.now();
+      try {
+        const rawList = await bridge.getEntities({ grpPrefix: 'haven.', refresh: forceRefresh });
+        if (!Array.isArray(rawList) || rawList.length === 0) return false;
+        const parsed: MediaItem[] = [];
+        const seen = new Set<string>();
+        for (const ent of rawList) {
+          if (!ent || typeof ent !== 'object') continue;
+          const item = parseBridgeEntityToMedia(ent as Record<string, unknown>, configRef.current);
+          if (item && !seen.has(item.id)) {
+            seen.add(item.id);
+            parsed.push(item);
+          }
+        }
+        parsed.sort((a, b) => b.createdAtBlock - a.createdAtBlock || b.createdAtMs - a.createdAtMs);
+        setLiveItems(parsed);
+        setDaos(buildDataDaoDirectory(parsed));
+        setLastScanMs(Math.round(performance.now() - t0));
+        setScanError(null);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [],
+  );
+
+  const refreshLibrary = useCallback(
+    async (forceRpc = false) => {
+      setScanning(true);
+      setScanError(null);
+
+      // Prefer Haven OS shared Arkiv entity cache when embedded
+      if (bridgeRef.current?.connectedToHost) {
+        const ok = await syncFromBridgeEntities(bridgeRef.current, forceRpc);
+        if (ok) {
+          setScanning(false);
+          return;
+        }
+      }
+
+      const res = await fetchHavenMediaLibrary(config);
+      setScanning(false);
+      setBlockNumber(res.blockNumber);
+      setLastScanMs(res.elapsedMs);
+      if (res.error) {
+        setScanError(res.error);
+      }
+      setLiveItems(res.items);
+      setDaos(buildDataDaoDirectory(res.items));
+    },
+    [config, syncFromBridgeEntities],
+  );
 
   // Cross-site Haven OS Bridge (haven-os:v1) handshake & live sync
   useEffect(() => {
@@ -187,6 +263,9 @@ export function HavenProvider({ children }: { children: ReactNode }) {
           'ok',
         );
       }
+
+      // Pull shared Arkiv entities immediately from Haven OS cache
+      void syncFromBridgeEntities(bridge, false);
     });
 
     const offAccounts = bridge.onEvent('accountsChanged', (data) => {
@@ -221,31 +300,34 @@ export function HavenProvider({ children }: { children: ReactNode }) {
       });
     });
 
+    const offEntities = bridge.onEvent('entitiesChanged', () => {
+      void syncFromBridgeEntities(bridge, false);
+    });
+
+    const offOpenEntity = bridge.onEvent('openEntity', (data) => {
+      const key =
+        typeof data === 'string'
+          ? data
+          : data && typeof data === 'object'
+            ? String((data as { key?: unknown; entityKey?: unknown }).key ?? (data as { entityKey?: unknown }).entityKey ?? '')
+            : '';
+      if (key) {
+        setPendingOpenEntityKey(key);
+      }
+    });
+
     return () => {
       cancelled = true;
       offAccounts();
       offChain();
       offConfig();
+      offEntities();
+      offOpenEntity();
     };
-  }, [showToast, updateConfig]);
-
-  const refreshLibrary = useCallback(async () => {
-    setScanning(true);
-    setScanError(null);
-    const res = await fetchHavenMediaLibrary(config);
-    setScanning(false);
-    setBlockNumber(res.blockNumber);
-    setLastScanMs(res.elapsedMs);
-    if (res.error) {
-      setScanError(res.error);
-    }
-    setLiveItems(res.items);
-    const directory = buildDataDaoDirectory(res.items);
-    setDaos(directory);
-  }, [config]);
+  }, [showToast, syncFromBridgeEntities, updateConfig]);
 
   useEffect(() => {
-    void refreshLibrary();
+    void refreshLibrary(false);
   }, [refreshLibrary]);
 
   // Inspect on-chain ERC-20/721 metadata & balanceOf whenever DAOs or wallet changes
@@ -271,7 +353,6 @@ export function HavenProvider({ children }: { children: ReactNode }) {
 
   const connect = useCallback(async () => {
     try {
-      // If attached to Haven OS bridge, delegate eth_requestAccounts to the OS host
       if (bridgeRef.current?.connectedToHost) {
         const accounts = (await bridgeRef.current.provider.request({
           method: 'eth_requestAccounts',
@@ -334,12 +415,23 @@ export function HavenProvider({ children }: { children: ReactNode }) {
 
         // Exercise Haven OS shared VetKD keyring first when embedded
         if (bridgeRef.current?.connectedToHost) {
-          const cached = await bridgeRef.current.getGateKey(gateId, epoch);
+          const cached = await bridgeRef.current.getGateKey(
+            {
+              gateId,
+              chainId: dao.chainId,
+              chainVariant: dao.chainVariant,
+              tokenAddress: dao.tokenAddress,
+              threshold: dao.threshold,
+              epoch,
+            },
+            epoch,
+          );
           const resolved =
             cached ??
             (await bridgeRef.current.unlockGate({
               gateId,
               chainId: dao.chainId,
+              chainVariant: dao.chainVariant,
               tokenAddress: dao.tokenAddress,
               threshold: dao.threshold,
               epoch,
@@ -351,6 +443,7 @@ export function HavenProvider({ children }: { children: ReactNode }) {
             gateId,
             epoch: resolved.epoch,
             rawKeyMaterial,
+            vetKey: deserializeBridgeVetKey(resolved.vetKeyBase64),
             unlockedAt: Date.now(),
           };
         } else {
@@ -359,6 +452,7 @@ export function HavenProvider({ children }: { children: ReactNode }) {
             provider: providerRef.current,
             address: wallet.address,
             chainId: dao.chainId,
+            chainVariant: dao.chainVariant,
             tokenAddress: dao.tokenAddress,
             threshold: dao.threshold,
             epoch,
@@ -429,6 +523,16 @@ export function HavenProvider({ children }: { children: ReactNode }) {
     [playlists.length],
   );
 
+  const renamePlaylist = useCallback((playlistId: string, name: string) => {
+    const clean = name.trim();
+    if (!clean) return;
+    setPlaylists((prev) => {
+      const next = prev.map((p) => (p.id === playlistId ? { ...p, name: clean } : p));
+      localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
   const addToPlaylist = useCallback(
     (playlistId: string, trackId: string) => {
       setPlaylists((prev) => {
@@ -445,13 +549,31 @@ export function HavenProvider({ children }: { children: ReactNode }) {
     [showToast],
   );
 
-  const deletePlaylist = useCallback((playlistId: string) => {
-    setPlaylists((prev) => {
-      const next = prev.filter((p) => p.id !== playlistId);
-      localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(next));
-      return next;
-    });
-  }, []);
+  const removeFromPlaylist = useCallback(
+    (playlistId: string, trackId: string) => {
+      setPlaylists((prev) => {
+        const next = prev.map((p) =>
+          p.id === playlistId ? { ...p, trackIds: p.trackIds.filter((id) => id !== trackId) } : p,
+        );
+        localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(next));
+        return next;
+      });
+      showToast('Removed item from playlist.', 'info');
+    },
+    [showToast],
+  );
+
+  const deletePlaylist = useCallback(
+    (playlistId: string) => {
+      setPlaylists((prev) => {
+        const next = prev.filter((p) => p.id !== playlistId);
+        localStorage.setItem(PLAYLISTS_KEY, JSON.stringify(next));
+        return next;
+      });
+      showToast('Playlist deleted.', 'info');
+    },
+    [showToast],
+  );
 
   const setRating = useCallback((id: string, rating: number) => {
     setLocalMeta((prev) => {
@@ -503,6 +625,7 @@ export function HavenProvider({ children }: { children: ReactNode }) {
       if (source === 'all' || source === 'community') return allItems;
       if (source === 'music') return allItems.filter((i) => i.kind === 'audio');
       if (source === 'videos') return allItems.filter((i) => i.kind === 'video');
+      if (source === 'images') return allItems.filter((i) => i.kind === 'image');
       if (source === 'drips') return allItems.filter((i) => i.kind === 'drip');
       if (source === 'my-uploads') {
         if (!wallet.address) return localPublished;
@@ -545,6 +668,8 @@ export function HavenProvider({ children }: { children: ReactNode }) {
     [allItems, geniusIds, localPublished, playlists, standingFor, wallet.address],
   );
 
+  const clearPendingOpenEntity = useCallback(() => setPendingOpenEntityKey(null), []);
+
   return (
     <HavenContext.Provider
       value={{
@@ -571,7 +696,9 @@ export function HavenProvider({ children }: { children: ReactNode }) {
         standingFor,
         playlists,
         createPlaylist,
+        renamePlaylist,
         addToPlaylist,
+        removeFromPlaylist,
         deletePlaylist,
         setRating,
         recordPlay,
@@ -580,6 +707,8 @@ export function HavenProvider({ children }: { children: ReactNode }) {
         geniusIds,
         runGenius,
         itemsForSource,
+        pendingOpenEntityKey,
+        clearPendingOpenEntity,
         toast,
         showToast,
       }}

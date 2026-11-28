@@ -8,9 +8,18 @@ interface MenuBarProps {
   setViewMode: (m: ViewMode) => void;
   setSource: (s: SourceId) => void;
   onCreatePlaylist: () => void;
+  showInspector: boolean;
+  onToggleInspector: () => void;
 }
 
-export function MenuBar({ viewMode, setViewMode, setSource, onCreatePlaylist }: MenuBarProps) {
+export function MenuBar({
+  viewMode,
+  setViewMode,
+  setSource,
+  onCreatePlaylist,
+  showInspector,
+  onToggleInspector,
+}: MenuBarProps) {
   const haven = useHaven();
   const player = usePlayer();
   const [openMenu, setOpenMenu] = useState<string | null>(null);
@@ -53,7 +62,7 @@ export function MenuBar({ viewMode, setViewMode, setSource, onCreatePlaylist }: 
               Upload via The Haven Bay…
             </button>
             <div className="win2k-sep" />
-            <button onClick={() => act(() => void haven.refreshLibrary())}>Rescan Arkiv L3 Library</button>
+            <button onClick={() => act(() => void haven.refreshLibrary(true))}>Rescan Arkiv L3 Library</button>
             <button onClick={() => act(() => setSource('settings'))}>Preferences &amp; RPC Settings…</button>
           </div>
         )}
@@ -101,6 +110,9 @@ export function MenuBar({ viewMode, setViewMode, setSource, onCreatePlaylist }: 
               {viewMode === 'coverflow' ? '✓ ' : ''}as Cover Flow
             </button>
             <div className="win2k-sep" />
+            <button onClick={() => act(onToggleInspector)}>
+              {showInspector ? '✓ ' : ''}Track Inspector Bar
+            </button>
             <button
               onClick={() =>
                 act(() => haven.updateConfig({ showDemoTracks: !haven.config.showDemoTracks }))
@@ -150,7 +162,7 @@ export function MenuBar({ viewMode, setViewMode, setSource, onCreatePlaylist }: 
               onClick={() =>
                 act(() =>
                   haven.showToast(
-                    'Haven Tunes 2000 — Arkiv OP L3 + Filecoin/IPFS + ICP Haven-AOL VetKD v3',
+                    'Haven Tunes 2000 — Arkiv OP L3 + Filecoin Synapse/IPFS + ICP Haven-AOL VetKD v3',
                     'info',
                   ),
                 )

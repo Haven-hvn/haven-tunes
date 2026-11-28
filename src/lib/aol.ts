@@ -1,142 +1,94 @@
-import { Actor, HttpAgent } from '@icp-sdk/core/agent';
+import { Actor, AnonymousIdentity, HttpAgent } from '@icp-sdk/core/agent';
 import { IDL } from '@icp-sdk/core/candid';
-import { DerivedPublicKey, EncryptedVetKey, TransportSecretKey } from '@icp-sdk/vetkeys';
-import type { HavenConfig, MediaItem } from '../types';
+import {
+  DerivedPublicKey,
+  EncryptedVetKey,
+  IbeCiphertext,
+  TransportSecretKey,
+  VetKey,
+} from '@icp-sdk/vetkeys';
+import type { HavenAolChainVariant, HavenConfig, MediaItem } from '../types';
+import { aolVariantFor, currentEpochNow } from './config';
 import { type Eip1193Provider, signTypedDataV4 } from './evm';
 import { getHavenOsBridge } from './osBridge';
 
-const AOL_IDL: IDL.InterfaceFactory = ({ IDL: idl }) => {
-  const GateKeyArgs = idl.Record({
-    chain_id: idl.Nat64,
-    token_address: idl.Text,
-    threshold: idl.Text,
-    epoch: idl.Nat64,
-    requester: idl.Text,
-    signature: idl.Text,
-    transport_public_key: idl.Vec(idl.Nat8),
+const ChainVariantIdl = IDL.Variant({
+  EthMainnet: IDL.Null,
+  EthSepolia: IDL.Null,
+  ArbitrumOne: IDL.Null,
+  BaseMainnet: IDL.Null,
+  OptimismMainnet: IDL.Null,
+});
+
+const GateRequestV3Idl = IDL.Record({
+  chain: ChainVariantIdl,
+  tokenAddress: IDL.Text,
+  threshold: IDL.Nat,
+  epoch: IDL.Nat,
+  evmAddress: IDL.Text,
+  transportPublicKey: IDL.Vec(IDL.Nat8),
+  nonce: IDL.Nat,
+  signature: IDL.Vec(IDL.Nat8),
+  eip712ChainId: IDL.Nat,
+  eip712VerifyingContract: IDL.Text,
+});
+
+const GateErrorIdl = IDL.Variant({
+  InsufficientBalance: IDL.Record({ required: IDL.Nat, actual: IDL.Nat }),
+  InvalidAddress: IDL.Text,
+  InvalidThreshold: IDL.Null,
+  InvalidEpoch: IDL.Text,
+  EvmRpcError: IDL.Text,
+  VetKDError: IDL.Text,
+  InvalidSignature: IDL.Text,
+  NonceAlreadyUsed: IDL.Null,
+});
+
+const GateResultIdl = IDL.Variant({
+  ok: IDL.Record({
+    encrypted_key: IDL.Vec(IDL.Nat8),
+    verification_key: IDL.Vec(IDL.Nat8),
+  }),
+  err: GateErrorIdl,
+});
+
+const AOL_V3_IDL: IDL.InterfaceFactory = () =>
+  IDL.Service({
+    requestDecryptionKeyV3: IDL.Func([GateRequestV3Idl], [GateResultIdl], []),
+    getCurrentEpoch: IDL.Func([], [IDL.Nat], ['query']),
+    getAttestationPublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], ['query']),
   });
-  const GateKeyResult = idl.Variant({
-    Ok: idl.Record({
-      encrypted_key: idl.Vec(idl.Nat8),
-      public_key: idl.Vec(idl.Nat8),
-      identity: idl.Vec(idl.Nat8),
-    }),
-    Err: idl.Text,
-  });
-  return idl.Service({
-    encrypted_key_for_gate: idl.Func([GateKeyArgs], [GateKeyResult], []),
-    vetkd_public_key: idl.Func([], [idl.Variant({ Ok: idl.Vec(idl.Nat8), Err: idl.Text })], []),
-  });
-};
 
 export interface UnlockedGateKey {
   gateId: string;
   epoch: number;
   rawKeyMaterial: Uint8Array;
+  vetKey?: VetKey;
   unlockedAt: number;
 }
 
-export async function unlockGateViaVetKd(params: {
-  config: HavenConfig;
-  provider: Eip1193Provider;
-  address: string;
-  chainId: number;
-  tokenAddress: string;
-  threshold: string;
-  epoch?: number;
-  gateId: string;
-}): Promise<UnlockedGateKey> {
-  const epoch = params.epoch ?? Math.floor(Date.now() / 1000 / 86400);
-  const typedData = {
-    types: {
-      EIP712Domain: [
-        { name: 'name', type: 'string' },
-        { name: 'version', type: 'string' },
-        { name: 'chainId', type: 'uint256' },
-      ],
-      GateRequestV3: [
-        { name: 'chainId', type: 'uint256' },
-        { name: 'tokenAddress', type: 'address' },
-        { name: 'threshold', type: 'string' },
-        { name: 'epoch', type: 'uint64' },
-        { name: 'requester', type: 'address' },
-      ],
-    },
-    primaryType: 'GateRequestV3',
-    domain: {
-      name: 'Haven-AOL',
-      version: '3',
-      chainId: params.chainId,
-    },
-    message: {
-      chainId: params.chainId,
-      tokenAddress: params.tokenAddress,
-      threshold: params.threshold,
-      epoch,
-      requester: params.address,
-    },
-  };
-
-  const signature = await signTypedDataV4(params.provider, params.address, typedData);
-  const tsk = TransportSecretKey.random();
-
-  const agent = await HttpAgent.create({ host: params.config.icpHost || 'https://icp-api.io' });
-  const actor = Actor.createActor(AOL_IDL, {
-    agent,
-    canisterId: params.config.aolCanisterId,
-  }) as unknown as {
-    encrypted_key_for_gate: (args: {
-      chain_id: bigint;
-      token_address: string;
-      threshold: string;
-      epoch: bigint;
-      requester: string;
-      signature: string;
-      transport_public_key: number[];
-    }) => Promise<
-      | { Ok: { encrypted_key: Uint8Array | number[]; public_key: Uint8Array | number[]; identity: Uint8Array | number[] } }
-      | { Err: string }
-    >;
-  };
-
-  const res = await actor.encrypted_key_for_gate({
-    chain_id: BigInt(params.chainId),
-    token_address: params.tokenAddress.toLowerCase(),
-    threshold: params.threshold,
-    epoch: BigInt(epoch),
-    requester: params.address.toLowerCase(),
-    signature,
-    transport_public_key: Array.from(tsk.publicKeyBytes()),
-  });
-
-  if ('Err' in res) {
-    throw new Error(`Haven-AOL rejected unlock: ${res.Err}`);
+function bytesToHex(bytes: Uint8Array): `0x${string}` {
+  let out = '0x';
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, '0');
   }
-
-  const encVetKey = EncryptedVetKey.deserialize(new Uint8Array(res.Ok.encrypted_key));
-  const dpk = DerivedPublicKey.deserialize(new Uint8Array(res.Ok.public_key));
-  const vetKey = encVetKey.decryptAndVerify(tsk, dpk, new Uint8Array(res.Ok.identity));
-  const rawKeyMaterial = await vetKey.deriveSymmetricKey('haven-aes-256-gcm', 32);
-
-  return {
-    gateId: params.gateId,
-    epoch,
-    rawKeyMaterial: new Uint8Array(rawKeyMaterial),
-    unlockedAt: Date.now(),
-  };
+  return out as `0x${string}`;
 }
 
-function fromBase64(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
   return out;
 }
 
-async function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
-  const buf = new ArrayBuffer(raw.byteLength);
-  new Uint8Array(buf).set(raw);
-  return crypto.subtle.importKey('raw', buf, { name: 'AES-GCM' }, false, ['decrypt']);
+function fromBase64(b64: string): Uint8Array {
+  const bin = atob(b64.trim());
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
@@ -145,21 +97,214 @@ function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
   return buf;
 }
 
+async function computeDerivationInputV3(
+  chainVariant: HavenAolChainVariant,
+  tokenAddress: string,
+  threshold: string,
+  epoch: number,
+): Promise<Uint8Array> {
+  const effectiveEpoch = threshold === '0' ? 0 : epoch;
+  const preimage = `accessol_v3:${chainVariant}:${tokenAddress.toLowerCase()}:${threshold}:${effectiveEpoch}`;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(preimage));
+  return new Uint8Array(digest);
+}
+
 /**
- * Supports both Haven HVN1 framed chunks (`HVN1` magic + chunk frames)
- * and standard `[12-byte IV][ciphertext+tag]` AES-GCM blobs.
+ * Restores a `VetKey` from the base64 representation returned by Haven OS Bridge (`haven_getGateKey` / `haven_unlockGate`).
+ */
+export function deserializeBridgeVetKey(vetKeyBase64?: string): VetKey | undefined {
+  if (!vetKeyBase64) return undefined;
+  try {
+    return VetKey.deserialize(fromBase64(vetKeyBase64));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Performs a real Haven-AOL v3 epoch unlock (EIP-712 GateRequestV3 -> ICP VetKD canister -> VetKey recovery).
+ */
+export async function unlockGateViaVetKd(params: {
+  config: HavenConfig;
+  provider: Eip1193Provider;
+  address: string;
+  chainId: number;
+  chainVariant?: HavenAolChainVariant;
+  tokenAddress: string;
+  threshold: string;
+  epoch?: number;
+  gateId: string;
+}): Promise<UnlockedGateKey> {
+  const epoch = params.epoch ?? currentEpochNow();
+  const chainVariant = params.chainVariant ?? aolVariantFor(params.chainId);
+  const tsk = TransportSecretKey.random();
+  const transportPublicKey = tsk.publicKeyBytes();
+
+  const nonceBytes = new Uint8Array(16);
+  crypto.getRandomValues(nonceBytes);
+  const nonce = BigInt(bytesToHex(nonceBytes));
+
+  const typedData = {
+    domain: {
+      name: 'HavenAOL',
+      chainId: params.config.eip712ChainId || 1,
+      verifyingContract: params.config.aolVerifyingContract || '0x0000000000000000000000000000000000000000',
+    },
+    primaryType: 'GateRequestV3',
+    types: {
+      EIP712Domain: [
+        { name: 'name', type: 'string' },
+        { name: 'chainId', type: 'uint256' },
+        { name: 'verifyingContract', type: 'address' },
+      ],
+      GateRequestV3: [
+        { name: 'evmAddress', type: 'address' },
+        { name: 'transportPublicKey', type: 'bytes' },
+        { name: 'epoch', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+      ],
+    },
+    message: {
+      evmAddress: params.address,
+      transportPublicKey: bytesToHex(transportPublicKey),
+      epoch: String(epoch),
+      nonce: nonce.toString(),
+    },
+  };
+
+  const sigHex = await signTypedDataV4(params.provider, params.address, typedData);
+  const sigBytes = hexToBytes(sigHex);
+  if (sigBytes.length !== 65) {
+    throw new Error(`Expected 65-byte EIP-712 signature, got ${sigBytes.length}`);
+  }
+
+  const agent = await HttpAgent.create({
+    host: params.config.icpHost || 'https://icp-api.io',
+    identity: new AnonymousIdentity(),
+    verifyQuerySignatures: false,
+  });
+
+  const actor = Actor.createActor(AOL_V3_IDL, {
+    agent,
+    canisterId: params.config.aolCanisterId,
+  }) as unknown as {
+    requestDecryptionKeyV3: (args: Record<string, unknown>) => Promise<
+      | { ok: { encrypted_key: Uint8Array | number[]; verification_key: Uint8Array | number[] } }
+      | { err: Record<string, unknown> }
+    >;
+  };
+
+  const res = await actor.requestDecryptionKeyV3({
+    chain: { [chainVariant]: null },
+    tokenAddress: params.tokenAddress.toLowerCase(),
+    threshold: BigInt(params.threshold || '0'),
+    epoch: BigInt(epoch),
+    evmAddress: params.address,
+    transportPublicKey: Array.from(transportPublicKey),
+    nonce,
+    signature: Array.from(sigBytes),
+    eip712ChainId: BigInt(params.config.eip712ChainId || 1),
+    eip712VerifyingContract:
+      params.config.aolVerifyingContract || '0x0000000000000000000000000000000000000000',
+  });
+
+  if ('err' in res) {
+    const errTag = Object.keys(res.err)[0] ?? 'UnknownError';
+    const errVal = res.err[errTag];
+    if (errTag === 'InsufficientBalance' && errVal && typeof errVal === 'object') {
+      const b = errVal as { required?: bigint; actual?: bigint };
+      throw new Error(
+        `Insufficient token balance: need ${b.required?.toString()}, wallet has ${b.actual?.toString()}`,
+      );
+    }
+    throw new Error(`Haven-AOL rejected unlock (${errTag}): ${String(errVal ?? '')}`);
+  }
+
+  const derivationInput = await computeDerivationInputV3(
+    chainVariant,
+    params.tokenAddress,
+    params.threshold || '0',
+    epoch,
+  );
+  const encVetKey = EncryptedVetKey.deserialize(new Uint8Array(res.ok.encrypted_key));
+  const dpk = DerivedPublicKey.deserialize(new Uint8Array(res.ok.verification_key));
+  const vetKey = encVetKey.decryptAndVerify(tsk, dpk, derivationInput);
+  const rawKeyMaterial = await vetKey.deriveSymmetricKey('haven-aes-256-gcm', 32);
+
+  return {
+    gateId: params.gateId,
+    epoch,
+    rawKeyMaterial: new Uint8Array(rawKeyMaterial),
+    vetKey,
+    unlockedAt: Date.now(),
+  };
+}
+
+async function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', toArrayBuffer(raw), { name: 'AES-GCM' }, false, ['decrypt']);
+}
+
+function unwrapIbeAesKey(
+  vetKey: VetKey,
+  gateJsonStr?: string,
+  gateJson?: Record<string, unknown>,
+): Uint8Array | null {
+  let obj = gateJson;
+  if (!obj && gateJsonStr) {
+    try {
+      obj = JSON.parse(gateJsonStr) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  const ctB64 =
+    (typeof obj?.encryptedAesKey === 'string' && obj.encryptedAesKey) ||
+    (typeof obj?.ibeCiphertext === 'string' && obj.ibeCiphertext) ||
+    null;
+  if (!ctB64) return null;
+  const ibeCt = IbeCiphertext.deserialize(fromBase64(ctB64));
+  return ibeCt.decrypt(vetKey);
+}
+
+/**
+ * Decrypts Haven's canonical framed AES-GCM layout:
+ *   1. `[12-byte base IV][u32LE idx][u32LE len][ct+16 tag]*` (chunk IV = baseIV XOR BE64(idx) in bytes 4..12)
+ *   2. Legacy HVN1 framed stream `[4B "HVN1"][4B chunkCount][12B iv + 4B len + ct]*`
+ *   3. Single-frame `[12-byte IV][ciphertext+tag]`
  */
 export async function decryptMediaBytes(
   ciphertext: Uint8Array,
-  keyMaterial: Uint8Array,
+  unlockedKey: UnlockedGateKey,
+  gateJsonStr?: string,
   gateJson?: Record<string, unknown>,
 ): Promise<Uint8Array> {
-  let contentKeyBytes = keyMaterial;
+  if (ciphertext.byteLength <= 28) {
+    throw new Error('Sealed media payload is too short to decrypt.');
+  }
 
-  // Unwrap per-file AES key if gateJson carries wrappedKey + iv
-  if (gateJson && typeof gateJson.wrappedKey === 'string' && typeof gateJson.iv === 'string') {
+  let contentKeyBytes = unlockedKey.rawKeyMaterial;
+
+  // 1. Canonical Haven-AOL IBE unwrap using VetKey
+  if (unlockedKey.vetKey) {
     try {
-      const kek = await importAesKey(keyMaterial);
+      const unwrapped = unwrapIbeAesKey(unlockedKey.vetKey, gateJsonStr, gateJson);
+      if (unwrapped && (unwrapped.byteLength === 32 || unwrapped.byteLength === 16)) {
+        contentKeyBytes = unwrapped;
+      }
+    } catch {
+      // Fall through to legacy wrappedKey / direct key material
+    }
+  }
+
+  // 2. Fallback: AES-GCM wrappedKey in gateJson
+  if (
+    contentKeyBytes === unlockedKey.rawKeyMaterial &&
+    gateJson &&
+    typeof gateJson.wrappedKey === 'string' &&
+    typeof gateJson.iv === 'string'
+  ) {
+    try {
+      const kek = await importAesKey(unlockedKey.rawKeyMaterial);
       const unwrapped = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: toArrayBuffer(fromBase64(gateJson.iv)) },
         kek,
@@ -173,7 +318,7 @@ export async function decryptMediaBytes(
 
   const aesKey = await importAesKey(contentKeyBytes);
 
-  // Check for HVN1 framed stream: [4B "HVN1"][4B chunkCount][for each: 12B iv + 4B len + ct]
+  // Format A: HVN1 magic framed stream
   if (
     ciphertext.byteLength > 12 &&
     ciphertext[0] === 0x48 &&
@@ -207,11 +352,55 @@ export async function decryptMediaBytes(
     return merged;
   }
 
-  // Standard raw [12B IV][ciphertext+tag]
-  const iv = ciphertext.subarray(0, 12);
+  // Format B: Canonical Haven framed AES-GCM `[12B baseIV][u32LE idx][u32LE len][ct+tag]*`
+  const baseIv = ciphertext.subarray(0, 12);
+  try {
+    const view = new DataView(ciphertext.buffer, ciphertext.byteOffset, ciphertext.byteLength);
+    let offset = 12;
+    const chunks: Uint8Array[] = [];
+    let expectedIdx = 0;
+
+    while (offset + 8 <= ciphertext.byteLength) {
+      const idx = view.getUint32(offset, true);
+      const len = view.getUint32(offset + 4, true);
+      offset += 8;
+      if (idx !== expectedIdx || len < 16 || offset + len > ciphertext.byteLength) {
+        throw new Error('Not framed');
+      }
+      const chunkCt = ciphertext.subarray(offset, offset + len);
+      offset += len;
+
+      const iv = new Uint8Array(baseIv);
+      const idxBig = BigInt(idx);
+      for (let b = 0; b < 8; b++) {
+        iv[11 - b] ^= Number((idxBig >> BigInt(b * 8)) & 0xffn);
+      }
+
+      const pt = new Uint8Array(
+        await crypto.subtle.decrypt({ name: 'AES-GCM', iv: toArrayBuffer(iv) }, aesKey, toArrayBuffer(chunkCt)),
+      );
+      chunks.push(pt);
+      expectedIdx += 1;
+    }
+
+    if (offset === ciphertext.byteLength && chunks.length > 0) {
+      const total = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+      const out = new Uint8Array(total);
+      let pos = 0;
+      for (const c of chunks) {
+        out.set(c, pos);
+        pos += c.byteLength;
+      }
+      return out;
+    }
+  } catch {
+    // Fall back to single-frame [12B IV][ciphertext+tag]
+  }
+
+  // Format C: Single-frame `[12B IV][ciphertext+tag]`
   const body = ciphertext.subarray(12);
   const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: toArrayBuffer(iv) },
+    { name: 'AES-GCM', iv: toArrayBuffer(baseIv) },
     aesKey,
     toArrayBuffer(body),
   );
@@ -239,19 +428,52 @@ function rememberLocalRaw(key: string, bytes: Uint8Array): void {
   localRawMediaBytes += bytes.byteLength;
 }
 
+function buildCandidateUrls(item: MediaItem, config: HavenConfig): Array<{ url: string; isSynapse: boolean }> {
+  const candidates: Array<{ url: string; isSynapse: boolean }> = [];
+  const seen = new Set<string>();
+  const add = (url: string | undefined, isSynapse = false) => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    candidates.push({ url, isSynapse });
+  };
+
+  const gw = (config.ipfsGateway.trim() || 'https://w3s.link').replace(/\/+$/, '');
+  const gwIpfs = gw.endsWith('/ipfs') ? gw : `${gw}/ipfs`;
+  const synapseBase = (config.synapseBaseUrl.trim() || 'https://api.synapse.storage').replace(/\/+$/, '');
+
+  if (item.pieceCid) {
+    add(`${synapseBase}/piece/${item.pieceCid}`, true);
+    add(`${gwIpfs}/${item.pieceCid}`);
+    add(`https://w3s.link/ipfs/${item.pieceCid}`);
+    add(`https://ipfs.io/ipfs/${item.pieceCid}`);
+  }
+  if (item.fcid) {
+    add(`${gwIpfs}/${item.fcid}`);
+    add(`https://w3s.link/ipfs/${item.fcid}`);
+    add(`https://dweb.link/ipfs/${item.fcid}`);
+    add(`https://ipfs.io/ipfs/${item.fcid}`);
+  }
+  if (item.mediaUrl) {
+    add(item.mediaUrl, item.mediaUrl.startsWith(synapseBase));
+  }
+  return candidates;
+}
+
 export async function fetchAndPrepareMediaUrl(
   item: MediaItem,
+  config: HavenConfig,
   unlockedKey?: UnlockedGateKey,
 ): Promise<{ objectUrl: string; decrypted: boolean; bytes: number }> {
-  if (!item.mediaUrl) {
+  const candidates = buildCandidateUrls(item, config);
+  if (candidates.length === 0) {
     throw new Error('No IPFS/Filecoin CID or media URL attached to this Arkiv entity.');
   }
 
-  const cacheKey = item.cid
-    ? item.encrypted
-      ? `piece:${item.cid}`
-      : `fcid:${item.cid}`
-    : `url:${item.mediaUrl}`;
+  const cacheKey = item.pieceCid
+    ? `piece:${item.pieceCid}`
+    : item.fcid
+      ? `fcid:${item.fcid}`
+      : `url:${candidates[0].url}`;
 
   const bridge = getHavenOsBridge();
   let raw: Uint8Array | null = null;
@@ -273,11 +495,11 @@ export async function fetchAndPrepareMediaUrl(
     raw = localRawMediaCache.get(cacheKey) ?? null;
   }
 
-  // 3. Fetch over the network on cache miss and persist into shared + local caches
+  // 3. Fetch across candidate gateways (Synapse + IPFS fallbacks) on cache miss
   if (!raw) {
     const transferId = `ht-dl-${item.cid || item.id}`;
     const label = item.title || item.cid || 'Haven media';
-    const fromSource = item.encrypted ? 'Filecoin / IPFS (Sealed)' : 'IPFS Gateway';
+    const fromSource = item.pieceCid ? 'Filecoin Synapse (Sealed)' : 'IPFS Gateway';
     bridge?.reportTransfer({
       id: transferId,
       direction: 'download',
@@ -288,49 +510,68 @@ export async function fetchAndPrepareMediaUrl(
       ...(item.sizeBytes ? { total: item.sizeBytes } : {}),
       status: 'active',
     });
-    try {
-      const resp = await fetch(item.mediaUrl);
-      if (!resp.ok) {
-        throw new Error(`Gateway fetch failed (${resp.status}) for ${item.cid || item.mediaUrl}`);
-      }
-      const headerTotal = Number(resp.headers.get('content-length') || 0);
-      const total = headerTotal > 0 ? headerTotal : item.sizeBytes || undefined;
 
-      if (resp.body && bridge?.connectedToHost) {
-        const reader = resp.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let loaded = 0;
-        let lastEmit = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            chunks.push(value);
-            loaded += value.byteLength;
-            const now = Date.now();
-            if (now - lastEmit >= 100) {
-              lastEmit = now;
-              bridge.reportTransfer({
-                id: transferId,
-                direction: 'download',
-                label,
-                from: fromSource,
-                to: 'Haven Tunes (Haven OS Cache)',
-                loaded,
-                ...(total ? { total } : {}),
-                status: 'active',
-              });
-            }
+    let lastErr = 'All gateways failed';
+    try {
+      for (const candidate of candidates) {
+        try {
+          const headers: Record<string, string> = {};
+          if (candidate.isSynapse && config.synapseApiKey) {
+            headers['X-API-KEY'] = config.synapseApiKey;
           }
+          const resp = await fetch(candidate.url, { headers });
+          if (!resp.ok) {
+            lastErr = `HTTP ${resp.status} from ${new URL(candidate.url).host}`;
+            continue;
+          }
+
+          const headerTotal = Number(resp.headers.get('content-length') || 0);
+          const total = headerTotal > 0 ? headerTotal : item.sizeBytes || undefined;
+
+          if (resp.body && bridge?.connectedToHost) {
+            const reader = resp.body.getReader();
+            const chunks: Uint8Array[] = [];
+            let loaded = 0;
+            let lastEmit = 0;
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) {
+                chunks.push(value);
+                loaded += value.byteLength;
+                const now = Date.now();
+                if (now - lastEmit >= 100) {
+                  lastEmit = now;
+                  bridge.reportTransfer({
+                    id: transferId,
+                    direction: 'download',
+                    label,
+                    from: fromSource,
+                    to: 'Haven Tunes (Haven OS Cache)',
+                    loaded,
+                    ...(total ? { total } : {}),
+                    status: 'active',
+                  });
+                }
+              }
+            }
+            raw = new Uint8Array(loaded);
+            let offset = 0;
+            for (const chunk of chunks) {
+              raw.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+          } else {
+            raw = new Uint8Array(await resp.arrayBuffer());
+          }
+          break;
+        } catch (err) {
+          lastErr = err instanceof Error ? err.message : String(err);
         }
-        raw = new Uint8Array(loaded);
-        let offset = 0;
-        for (const chunk of chunks) {
-          raw.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-      } else {
-        raw = new Uint8Array(await resp.arrayBuffer());
+      }
+
+      if (!raw) {
+        throw new Error(`Could not fetch ${item.cid || item.title} (${lastErr})`);
       }
 
       bridge?.reportTransfer({
@@ -360,7 +601,7 @@ export async function fetchAndPrepareMediaUrl(
         .mediaCachePut({
           key: cacheKey,
           bytes: toArrayBuffer(raw),
-          mimeType: item.mimeType || 'video/mp4',
+          mimeType: item.mimeType || 'application/octet-stream',
           encrypted: Boolean(item.encrypted),
         })
         .catch(() => undefined);
@@ -371,7 +612,7 @@ export async function fetchAndPrepareMediaUrl(
     if (!unlockedKey) {
       throw new Error('Encrypted DataDAO item — unlock this gate via Haven-AOL VetKD first.');
     }
-    const plain = await decryptMediaBytes(raw, unlockedKey.rawKeyMaterial, item.gateJson);
+    const plain = await decryptMediaBytes(raw, unlockedKey, item.gateJsonStr, item.gateJson);
     const blob = new Blob([toArrayBuffer(plain)], { type: item.mimeType || 'video/mp4' });
     return { objectUrl: URL.createObjectURL(blob), decrypted: true, bytes: plain.byteLength };
   }

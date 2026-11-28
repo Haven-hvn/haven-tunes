@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SourceId, ViewMode } from './types';
 import { HavenProvider, useHaven } from './state/HavenContext';
-import { PlayerProvider } from './state/PlayerContext';
+import { PlayerProvider, usePlayer } from './state/PlayerContext';
 import { MenuBar } from './components/MenuBar';
 import { Toolbar } from './components/Toolbar';
 import { Sidebar } from './components/Sidebar';
@@ -12,12 +12,26 @@ import { CoverFlowView } from './components/CoverFlowView';
 import { SettingsView } from './components/SettingsView';
 import { StatusBar } from './components/StatusBar';
 
+function formatSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
 function HavenTunesShell() {
   const haven = useHaven();
+  const player = usePlayer();
   const [source, setSource] = useState<SourceId>('all');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showInspector, setShowInspector] = useState(true);
   const [nav, setNav] = useState<{ back: SourceId[]; forward: SourceId[] }>({ back: [], forward: [] });
 
   const selectSource = useCallback((next: SourceId) => {
@@ -44,6 +58,20 @@ function HavenTunesShell() {
     setSource(next);
   }, [nav, source]);
 
+  // Handle Haven OS Gate Explorer "Open in Haven Tunes" bridge event
+  useEffect(() => {
+    if (!haven.pendingOpenEntityKey) return;
+    const match = haven.allItems.find(
+      (i) => i.entityKey === haven.pendingOpenEntityKey || i.id === haven.pendingOpenEntityKey,
+    );
+    if (match) {
+      setSource('all');
+      setSelectedId(match.id);
+      haven.clearPendingOpenEntity();
+      void player.playItem(match, haven.allItems);
+    }
+  }, [haven, player]);
+
   const sourceItems = useMemo(() => haven.itemsForSource(source), [haven, source]);
 
   const visibleItems = useMemo(() => {
@@ -54,6 +82,7 @@ function HavenTunesShell() {
         i.title.toLowerCase().includes(q) ||
         i.artist.toLowerCase().includes(q) ||
         i.album.toLowerCase().includes(q) ||
+        i.grp.toLowerCase().includes(q) ||
         i.tags.some((t) => t.toLowerCase().includes(q)) ||
         (i.cid && i.cid.toLowerCase().includes(q)),
     );
@@ -80,6 +109,15 @@ function HavenTunesShell() {
     ? haven.daos.find((d) => d.gateId === source.slice(4))
     : null;
 
+  const activePlaylist = source.startsWith('pl:')
+    ? haven.playlists.find((p) => p.id === source) ?? null
+    : null;
+
+  const inspectedItem = useMemo(
+    () => haven.allItems.find((i) => i.id === selectedId) ?? player.currentItem ?? null,
+    [haven.allItems, player.currentItem, selectedId],
+  );
+
   return (
     <div className="w2k-app">
       <MenuBar
@@ -87,6 +125,8 @@ function HavenTunesShell() {
         setViewMode={setViewMode}
         setSource={selectSource}
         onCreatePlaylist={handleCreatePlaylist}
+        showInspector={showInspector}
+        onToggleInspector={() => setShowInspector((s) => !s)}
       />
 
       <Toolbar
@@ -129,16 +169,114 @@ function HavenTunesShell() {
             </div>
           )}
 
+          {activePlaylist && (
+            <div className="w2k-dao-banner">
+              <div>
+                <strong>♫ {activePlaylist.name}</strong> · {activePlaylist.trackIds.length} item
+                {activePlaylist.trackIds.length === 1 ? '' : 's'}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  className="w2k-btn w2k-btn-xs"
+                  onClick={() => {
+                    const nextName = window.prompt('Rename playlist:', activePlaylist.name);
+                    if (nextName) haven.renamePlaylist(activePlaylist.id, nextName);
+                  }}
+                >
+                  Rename
+                </button>
+                <button
+                  className="w2k-btn w2k-btn-xs"
+                  onClick={() => {
+                    haven.deletePlaylist(activePlaylist.id);
+                    selectSource('all');
+                  }}
+                >
+                  Delete Playlist
+                </button>
+              </div>
+            </div>
+          )}
+
           <VideoTheater />
 
           {source === 'settings' ? (
             <SettingsView />
           ) : viewMode === 'list' ? (
-            <ListView items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
+            <ListView
+              items={visibleItems}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              activePlaylistId={activePlaylist?.id ?? null}
+            />
           ) : viewMode === 'grid' ? (
             <GridView items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
           ) : (
             <CoverFlowView items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
+          )}
+
+          {showInspector && inspectedItem && source !== 'settings' && (
+            <div className="w2k-inspector">
+              <div className="w2k-inspector-meta">
+                <strong>{inspectedItem.title}</strong>
+                <span className="w2k-inspector-sep">·</span>
+                <code className="w2k-mono">{inspectedItem.grp}</code>
+                <span className="w2k-inspector-sep">·</span>
+                <span>{inspectedItem.mimeType}</span>
+                {inspectedItem.sizeBytes ? (
+                  <>
+                    <span className="w2k-inspector-sep">·</span>
+                    <span>{formatSize(inspectedItem.sizeBytes)}</span>
+                  </>
+                ) : null}
+                {inspectedItem.cid ? (
+                  <>
+                    <span className="w2k-inspector-sep">·</span>
+                    <code className="w2k-mono" title={inspectedItem.cid}>
+                      {inspectedItem.pieceCid ? 'Piece: ' : 'CID: '}
+                      {inspectedItem.cid.slice(0, 14)}…
+                    </code>
+                  </>
+                ) : null}
+              </div>
+              <div className="w2k-inspector-actions">
+                <button
+                  className="w2k-btn w2k-btn-xs"
+                  onClick={() => void player.playItem(inspectedItem, visibleItems)}
+                >
+                  ▶ Play
+                </button>
+                {haven.playlists.length > 0 && (
+                  <select
+                    className="w2k-input w2k-inspector-select"
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        haven.addToPlaylist(e.target.value, inspectedItem.id);
+                      }
+                    }}
+                  >
+                    <option value="">+ Add to Playlist…</option>
+                    {haven.playlists.map((pl) => (
+                      <option key={pl.id} value={pl.id}>
+                        {pl.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {inspectedItem.cid && (
+                  <button
+                    className="w2k-btn w2k-btn-xs"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(inspectedItem.cid!);
+                      haven.showToast('Copied CID to clipboard.', 'ok');
+                    }}
+                  >
+                    Copy CID
+                  </button>
+                )}
+              </div>
+            </div>
           )}
         </main>
       </div>

@@ -52,7 +52,7 @@ export function StatusBar({ items, onCreatePlaylist, onGenius }: StatusBarProps)
       </div>
 
       <div className="w2k-sb-right">
-        <button className="w2k-btn w2k-btn-xs" onClick={() => void haven.refreshLibrary()}>
+        <button className="w2k-btn w2k-btn-xs" onClick={() => void haven.refreshLibrary(true)}>
           {haven.scanning ? 'Scanning…' : '↻ Sync'}
         </button>
       </div>

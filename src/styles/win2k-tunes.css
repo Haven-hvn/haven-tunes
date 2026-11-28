@@ -1083,3 +1083,53 @@ tr.selected .w2k-star.on {
 .w2k-toast.ok { background: #dff5e3; border-color: #1c6b35; color: #0f4721; }
 .w2k-toast.warn { background: #fff3cd; border-color: #856404; color: #5c4500; }
 .w2k-toast.err { background: #f8d7da; border-color: #842029; color: #6b151d; }
+
+/* Image Viewer inside Theater */
+.w2k-image-el {
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  background: #000;
+  border: 1px solid var(--w2k-dk);
+}
+
+/* Bottom Track / Entity Inspector Bar */
+.w2k-inspector {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--w2k-face);
+  border-top: 1px solid var(--w2k-shadow);
+  box-shadow: inset 0 1px 0 var(--w2k-white);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+
+.w2k-inspector-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.w2k-inspector-sep {
+  color: var(--w2k-shadow);
+}
+
+.w2k-inspector-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.w2k-inspector-select {
+  height: 20px;
+  padding: 0 4px;
+  font-size: 10.5px;
+}
