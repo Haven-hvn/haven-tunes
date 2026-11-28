@@ -27,6 +27,52 @@ export interface HavenOsWelcomePayload {
   wallet: HavenOsBridgeWalletInfo;
   config: HavenOsBridgeConfig;
   unlockedGates: string[];
+  entityCount?: number;
+  capabilities?: string[];
+}
+
+export interface HavenOsCachedMedia {
+  key: string;
+  bytes: ArrayBuffer;
+  mimeType: string;
+  size: number;
+  encrypted: boolean;
+  createdAt: number;
+  lastAccessedAt: number;
+  meta?: Record<string, unknown>;
+}
+
+export interface HavenOsMediaCachePutParams {
+  key: string;
+  bytes: ArrayBuffer | Uint8Array | Blob;
+  mimeType?: string;
+  encrypted?: boolean;
+  meta?: Record<string, unknown>;
+}
+
+export interface HavenOsMediaCachePutResult {
+  stored: boolean;
+  size: number;
+  evictedCount: number;
+  reason?: string;
+}
+
+export interface HavenOsMediaCacheStats {
+  count: number;
+  totalBytes: number;
+  maxBytes: number;
+}
+
+export interface HavenOsTransferReport {
+  id: string;
+  direction: "upload" | "download";
+  label: string;
+  from?: string;
+  to?: string;
+  loaded?: number;
+  total?: number;
+  status: "active" | "done" | "error" | "cancelled";
+  detail?: string;
 }
 
 export interface HavenOsGateKeyResult {
@@ -89,7 +135,13 @@ export interface HavenOsBridgeWelcome {
 export interface HavenOsBridgeEvent {
   channel: typeof HAVEN_OS_BRIDGE_CHANNEL;
   kind: "event";
-  event: "accountsChanged" | "chainChanged" | "configChanged" | "keyringChanged";
+  event:
+    | "accountsChanged"
+    | "chainChanged"
+    | "configChanged"
+    | "keyringChanged"
+    | "entitiesChanged"
+    | "openEntity";
   data: unknown;
 }
 
@@ -119,6 +171,17 @@ export interface HavenOsBridgeClient {
     epoch?: number,
   ) => Promise<HavenOsGateKeyResult | null>;
   unlockGate: (params: HavenOsUnlockGateParams) => Promise<HavenOsGateKeyResult>;
+  getEntities: (params?: {
+    grpPrefix?: string;
+    gateKey?: string;
+    refresh?: boolean;
+  }) => Promise<unknown[]>;
+  mediaCacheGet: (key: string) => Promise<HavenOsCachedMedia | null>;
+  mediaCacheHas: (key: string) => Promise<boolean>;
+  mediaCachePut: (params: HavenOsMediaCachePutParams) => Promise<HavenOsMediaCachePutResult>;
+  mediaCacheDelete: (key: string) => Promise<{ deleted: boolean }>;
+  mediaCacheStats: () => Promise<HavenOsMediaCacheStats>;
+  reportTransfer: (report: HavenOsTransferReport) => void;
   onEvent: (
     event: HavenOsBridgeEvent["event"],
     listener: (data: unknown) => void,
@@ -331,6 +394,22 @@ export function registerHavenOsBridge(options?: {
     },
     unlockGate: (params) =>
       rpc("haven_unlockGate", params, 120_000) as Promise<HavenOsGateKeyResult>,
+    getEntities: (params) =>
+      rpc("haven_getEntities", params) as Promise<unknown[]>,
+    mediaCacheGet: (key) =>
+      rpc("haven_mediaCacheGet", { key }, 15_000) as Promise<HavenOsCachedMedia | null>,
+    mediaCacheHas: (key) =>
+      rpc("haven_mediaCacheHas", { key }, 5_000) as Promise<boolean>,
+    mediaCachePut: (params) =>
+      rpc("haven_mediaCachePut", params, 30_000) as Promise<HavenOsMediaCachePutResult>,
+    mediaCacheDelete: (key) =>
+      rpc("haven_mediaCacheDelete", { key }, 5_000) as Promise<{ deleted: boolean }>,
+    mediaCacheStats: () =>
+      rpc("haven_mediaCacheStats", {}, 5_000) as Promise<HavenOsMediaCacheStats>,
+    reportTransfer: (report) => {
+      if (!connectedToHost) return;
+      void rpc("haven_reportTransfer", report, 5_000).catch(() => undefined);
+    },
     onEvent: (event, listener) => {
       provider.on(event, listener as (...args: unknown[]) => void);
       return () => provider.removeListener(event, listener as (...args: unknown[]) => void);

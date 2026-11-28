@@ -3,6 +3,7 @@ import { IDL } from '@icp-sdk/core/candid';
 import { DerivedPublicKey, EncryptedVetKey, TransportSecretKey } from '@icp-sdk/vetkeys';
 import type { HavenConfig, MediaItem } from '../types';
 import { type Eip1193Provider, signTypedDataV4 } from './evm';
+import { getHavenOsBridge } from './osBridge';
 
 const AOL_IDL: IDL.InterfaceFactory = ({ IDL: idl }) => {
   const GateKeyArgs = idl.Record({
@@ -217,6 +218,27 @@ export async function decryptMediaBytes(
   return new Uint8Array(plain);
 }
 
+const LOCAL_MEDIA_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+const localRawMediaCache = new Map<string, Uint8Array>();
+let localRawMediaBytes = 0;
+
+function rememberLocalRaw(key: string, bytes: Uint8Array): void {
+  if (bytes.byteLength === 0 || bytes.byteLength > LOCAL_MEDIA_CACHE_MAX_BYTES) return;
+  const existing = localRawMediaCache.get(key);
+  if (existing) {
+    localRawMediaBytes -= existing.byteLength;
+    localRawMediaCache.delete(key);
+  }
+  while (localRawMediaBytes + bytes.byteLength > LOCAL_MEDIA_CACHE_MAX_BYTES && localRawMediaCache.size > 0) {
+    const firstKey = localRawMediaCache.keys().next().value as string;
+    const evicted = localRawMediaCache.get(firstKey);
+    if (evicted) localRawMediaBytes -= evicted.byteLength;
+    localRawMediaCache.delete(firstKey);
+  }
+  localRawMediaCache.set(key, bytes);
+  localRawMediaBytes += bytes.byteLength;
+}
+
 export async function fetchAndPrepareMediaUrl(
   item: MediaItem,
   unlockedKey?: UnlockedGateKey,
@@ -224,11 +246,126 @@ export async function fetchAndPrepareMediaUrl(
   if (!item.mediaUrl) {
     throw new Error('No IPFS/Filecoin CID or media URL attached to this Arkiv entity.');
   }
-  const resp = await fetch(item.mediaUrl);
-  if (!resp.ok) {
-    throw new Error(`Gateway fetch failed (${resp.status}) for ${item.cid || item.mediaUrl}`);
+
+  const cacheKey = item.cid
+    ? item.encrypted
+      ? `piece:${item.cid}`
+      : `fcid:${item.cid}`
+    : `url:${item.mediaUrl}`;
+
+  const bridge = getHavenOsBridge();
+  let raw: Uint8Array | null = null;
+
+  // 1. Check Haven OS shared IndexedDB media cache (shared across all embedded apps)
+  if (bridge?.connectedToHost) {
+    try {
+      const hit = await bridge.mediaCacheGet(cacheKey);
+      if (hit?.bytes) {
+        raw = new Uint8Array(hit.bytes);
+      }
+    } catch {
+      // Fall through to local cache / network fetch
+    }
   }
-  const raw = new Uint8Array(await resp.arrayBuffer());
+
+  // 2. Fall back to in-memory cache (for standalone mode)
+  if (!raw) {
+    raw = localRawMediaCache.get(cacheKey) ?? null;
+  }
+
+  // 3. Fetch over the network on cache miss and persist into shared + local caches
+  if (!raw) {
+    const transferId = `ht-dl-${item.cid || item.id}`;
+    const label = item.title || item.cid || 'Haven media';
+    const fromSource = item.encrypted ? 'Filecoin / IPFS (Sealed)' : 'IPFS Gateway';
+    bridge?.reportTransfer({
+      id: transferId,
+      direction: 'download',
+      label,
+      from: fromSource,
+      to: 'Haven Tunes (Haven OS Cache)',
+      loaded: 0,
+      ...(item.sizeBytes ? { total: item.sizeBytes } : {}),
+      status: 'active',
+    });
+    try {
+      const resp = await fetch(item.mediaUrl);
+      if (!resp.ok) {
+        throw new Error(`Gateway fetch failed (${resp.status}) for ${item.cid || item.mediaUrl}`);
+      }
+      const headerTotal = Number(resp.headers.get('content-length') || 0);
+      const total = headerTotal > 0 ? headerTotal : item.sizeBytes || undefined;
+
+      if (resp.body && bridge?.connectedToHost) {
+        const reader = resp.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let loaded = 0;
+        let lastEmit = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            loaded += value.byteLength;
+            const now = Date.now();
+            if (now - lastEmit >= 100) {
+              lastEmit = now;
+              bridge.reportTransfer({
+                id: transferId,
+                direction: 'download',
+                label,
+                from: fromSource,
+                to: 'Haven Tunes (Haven OS Cache)',
+                loaded,
+                ...(total ? { total } : {}),
+                status: 'active',
+              });
+            }
+          }
+        }
+        raw = new Uint8Array(loaded);
+        let offset = 0;
+        for (const chunk of chunks) {
+          raw.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+      } else {
+        raw = new Uint8Array(await resp.arrayBuffer());
+      }
+
+      bridge?.reportTransfer({
+        id: transferId,
+        direction: 'download',
+        label,
+        from: fromSource,
+        to: 'Haven Tunes (Haven OS Cache)',
+        loaded: raw.byteLength,
+        total: raw.byteLength,
+        status: 'done',
+      });
+    } catch (err) {
+      bridge?.reportTransfer({
+        id: transferId,
+        direction: 'download',
+        label,
+        status: 'error',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+
+    rememberLocalRaw(cacheKey, raw);
+    if (bridge?.connectedToHost) {
+      void bridge
+        .mediaCachePut({
+          key: cacheKey,
+          bytes: toArrayBuffer(raw),
+          mimeType: item.mimeType || 'video/mp4',
+          encrypted: Boolean(item.encrypted),
+        })
+        .catch(() => undefined);
+    }
+  }
 
   if (item.encrypted) {
     if (!unlockedKey) {
